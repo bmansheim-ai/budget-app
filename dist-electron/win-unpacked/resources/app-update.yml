@@ -1,0 +1,4 @@
+owner: bmansheim-ai
+repo: budget-app
+provider: github
+updaterCacheDirName: budget-app-updater

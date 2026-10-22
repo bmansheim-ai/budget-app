@@ -1,0 +1,11 @@
+directories:
+  output: dist-electron
+  buildResources: build
+appId: com.mansheim.budgetprocessor
+productName: Mansheim Budget Processor
+win:
+  target:
+    - nsis
+    - portable
+files: []
+electronVersion: 33.4.11

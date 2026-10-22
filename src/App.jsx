@@ -1,9 +1,9 @@
-import React, { useState, useMemo, useRef } from "react";
+import React, { useState, useMemo, useRef, useEffect } from "react";
 import * as XLSX from "xlsx";
 import { 
   Upload, FileSpreadsheet, Copy, Check, Plus, Trash2, Tag, ChevronDown, 
-  ChevronUp, Search, Download, FolderUp, CheckCircle2, ShieldCheck, 
-  Scale, ArrowDownRight, ArrowUpRight, CreditCard, Building2, Table
+  ChevronUp, Search, Download, FolderUp, CheckCircle2, 
+  Scale, CreditCard, Building2, Table, UserCheck, Calendar, Folder
 } from "lucide-react";
 
 // Exact 56 categories from the cat3 sheet
@@ -33,17 +33,54 @@ const DEFAULT_RULES = {
   "Misc ": ["סופרמרקט", "שופרסל", "רמי לוי", "אושר עד", "ויקטורי", "מחסני השוק", "יש חסד", "יש בשכונה"]
 };
 
+// Helper function to format Excel serial dates or Date objects into DD/MM/YYYY and extract Month-Year key
+const formatDateAndMonth = (val) => {
+  if (!val) return { dateStr: "", monthKey: "" };
+  let dateObj = null;
+
+  if (val instanceof Date) {
+    dateObj = val;
+  } else if (typeof val === 'number' && val > 30000 && val < 60000) {
+    const excelEpoch = new Date(1899, 11, 30);
+    dateObj = new Date(excelEpoch.getTime() + val * 86400000);
+  } else if (typeof val === 'string' && val.includes('/')) {
+    const parts = val.split('/');
+    if (parts.length === 3) {
+      dateObj = new Date(parts[2], parts[1] - 1, parts[0]);
+    }
+  }
+
+  if (dateObj && !isNaN(dateObj.getTime())) {
+    const day = String(dateObj.getDate()).padStart(2, '0');
+    const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+    const year = dateObj.getFullYear();
+    return { 
+      dateStr: `${day}/${month}/${year}`, 
+      monthKey: `${year}-${month}` 
+    };
+  }
+
+  return { dateStr: String(val), monthKey: "" };
+};
+
 export default function App() {
   const [bankTransactions, setBankTransactions] = useState([]);
   const [ccTransactions, setCcTransactions] = useState([]);
   const [bankFileName, setBankFileName] = useState("");
   const [ccFileName, setCcFileName] = useState("");
   const [bankBalances, setBankBalances] = useState({ beginning: 0, ending: 0 });
+  const [statementMonth, setStatementMonth] = useState("");
+  const [savedMonthsList, setSavedMonthsList] = useState([]);
 
+  // STATIC GLOBAL RULES (Applies across ALL months)
   const [rules, setRules] = useState(() => {
     const saved = localStorage.getItem("budget_rules");
     return saved ? JSON.parse(saved) : DEFAULT_RULES;
   });
+
+  // Manual one-time overrides for the currently loaded statement month
+  const [manualOverrides, setManualOverrides] = useState({});
+
   const [newKeyword, setNewKeyword] = useState("");
   const [selectedCategory, setSelectedCategory] = useState(DEFAULT_CATEGORIES[0]);
   const [copied, setCopied] = useState(false);
@@ -55,9 +92,59 @@ export default function App() {
   const rulesSectionRef = useRef(null);
   const fileInputRulesRef = useRef(null);
 
+  // Load saved months list on startup
+  useEffect(() => {
+    const keys = Object.keys(localStorage).filter(k => k.startsWith("budget_month_"));
+    const months = keys.map(k => k.replace("budget_month_", "")).sort().reverse();
+    setSavedMonthsList(months);
+  }, [statementMonth]);
+
+  // Automatically save monthly progress whenever transactions or overrides change
+  useEffect(() => {
+    if (!statementMonth) return;
+    const monthData = {
+      bankTransactions,
+      ccTransactions,
+      bankFileName,
+      ccFileName,
+      bankBalances,
+      manualOverrides
+    };
+    localStorage.setItem(`budget_month_${statementMonth}`, JSON.stringify(monthData));
+  }, [statementMonth, bankTransactions, ccTransactions, bankFileName, ccFileName, bankBalances, manualOverrides]);
+
+  const loadSavedMonth = (monthKey) => {
+    if (!monthKey) return;
+    const raw = localStorage.getItem(`budget_month_${monthKey}`);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        setBankTransactions(parsed.bankTransactions || []);
+        setCcTransactions(parsed.ccTransactions || []);
+        setBankFileName(parsed.bankFileName || "");
+        setCcFileName(parsed.ccFileName || "");
+        setBankBalances(parsed.bankBalances || { beginning: 0, ending: 0 });
+        setManualOverrides(parsed.manualOverrides || {});
+        setStatementMonth(monthKey);
+      } catch (err) {
+        console.error("Failed to load month progress", err);
+      }
+    }
+  };
+
   const saveRules = (updatedRules) => {
     setRules(updatedRules);
     localStorage.setItem("budget_rules", JSON.stringify(updatedRules));
+  };
+
+  const handleManualOverride = (txnKey, category) => {
+    const updated = { ...manualOverrides };
+    if (category === "Uncategorized") {
+      delete updated[txnKey];
+    } else {
+      updated[txnKey] = category;
+    }
+    setManualOverrides(updated);
   };
 
   const handleAddRule = (e) => {
@@ -105,62 +192,90 @@ export default function App() {
     reader.readAsText(file);
   };
 
-  const handleFileUpload = (e, type) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      const bstr = evt.target.result;
-      const wb = XLSX.read(bstr, { type: "binary" });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      const data = XLSX.utils.sheet_to_json(ws, { header: 1 });
+  // Combined Multi-File Upload Handler (Uploads Bank and CC in one action)
+  const handleMultiFileUpload = (e) => {
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
 
-      if (type === "bank") {
-        setBankFileName(file.name);
-        
-        let headerIdx = data.findIndex(row => row && row.some(cell => String(cell).includes("תאריך")));
-        if (headerIdx === -1) headerIdx = 7;
-        const rows = data.slice(headerIdx + 1);
-        
-        const parsed = rows.map(r => {
-          if (!r || r.length < 5) return null;
-          return { 
-            date: r[0], 
-            desc: String(r[2] || ""), 
-            amount: parseFloat(r[3]) || 0, 
-            balance: parseFloat(r[4]) || 0,
-            source: "Bank" 
-          };
-        }).filter(item => item && item.desc && !isNaN(item.amount));
+    files.forEach(file => {
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        const bstr = evt.target.result;
+        const wb = XLSX.read(bstr, { type: "binary" });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const data = XLSX.utils.sheet_to_json(ws, { header: 1 });
 
-        setBankTransactions(parsed);
+        const isBank = data.some(row => row && row.some(cell => String(cell).includes("₪ יתרה")));
+        const isCc = data.some(row => row && row.some(cell => String(cell).includes("בית עסק")));
 
-        if (parsed.length > 0) {
-          const firstTxn = parsed[0];
-          const lastTxn = parsed[parsed.length - 1];
-          const begBal = firstTxn.balance - firstTxn.amount;
-          const endBal = lastTxn.balance;
-          setBankBalances({ beginning: begBal, ending: endBal });
+        if (isBank) {
+          setBankFileName(file.name);
+          let headerIdx = data.findIndex(row => row && row.some(cell => String(cell).includes("תאריך")));
+          if (headerIdx === -1) headerIdx = 7;
+          const rows = data.slice(headerIdx + 1);
+          
+          let detectedMonth = "";
+          const parsed = rows.map((r, idx) => {
+            if (!r || r.length < 5) return null;
+            const { dateStr, monthKey } = formatDateAndMonth(r[0]);
+            if (monthKey && !detectedMonth) detectedMonth = monthKey;
+            const desc = String(r[2] || "");
+            const amount = parseFloat(r[3]) || 0;
+            const balance = parseFloat(r[4]) || 0;
+            const txnKey = `${r[0]}_${desc}_${amount}_${idx}`;
+            return { 
+              id: txnKey,
+              date: dateStr, 
+              desc: desc, 
+              amount: amount, 
+              balance: balance,
+              source: "Bank" 
+            };
+          }).filter(item => item && item.desc && !isNaN(item.amount));
+
+          setBankTransactions(parsed);
+          if (detectedMonth) setStatementMonth(detectedMonth);
+
+          if (parsed.length > 0) {
+            const firstTxn = parsed[0];
+            const lastTxn = parsed[parsed.length - 1];
+            const begBal = firstTxn.balance - firstTxn.amount;
+            const endBal = lastTxn.balance;
+            setBankBalances({ beginning: begBal, ending: endBal });
+          }
+        } else if (isCc || !isBank) {
+          setCcFileName(file.name);
+          let headerIdx = data.findIndex(row => row && row.some(cell => String(cell).includes("בית עסק")));
+          if (headerIdx === -1) headerIdx = 7;
+          const rows = data.slice(headerIdx + 1);
+          
+          const parsed = rows.map((r, idx) => {
+            if (!r || r.length < 9) return null;
+            let amt = parseFloat(r[8]) || 0;
+            if (amt > 0) amt = -amt;
+            const { dateStr } = formatDateAndMonth(r[2]);
+            const desc = String(r[1] || "");
+            const txnKey = `${r[2]}_${desc}_${amt}_cc_${idx}`;
+            return { 
+              id: txnKey,
+              date: dateStr, 
+              desc: desc, 
+              amount: amt, 
+              source: "Credit Card" 
+            };
+          }).filter(item => item && item.desc && !isNaN(item.amount));
+          setCcTransactions(parsed);
         }
-      } else if (type === "cc") {
-        setCcFileName(file.name);
-        let headerIdx = data.findIndex(row => row && row.some(cell => String(cell).includes("בית עסק")));
-        if (headerIdx === -1) headerIdx = 7;
-        const rows = data.slice(headerIdx + 1);
-        const parsed = rows.map(r => {
-          if (!r || r.length < 9) return null;
-          let amt = parseFloat(r[8]) || 0;
-          if (amt > 0) amt = -amt;
-          return { date: r[2], desc: String(r[1] || ""), amount: amt, source: "Credit Card" };
-        }).filter(item => item && item.desc && !isNaN(item.amount));
-        setCcTransactions(parsed);
-      }
-    };
-    reader.readAsBinaryString(file);
+      };
+      reader.readAsBinaryString(file);
+    });
   };
 
-  const categorize = (desc) => {
-    const lowerDesc = String(desc).toLowerCase();
+  const categorize = (txn) => {
+    if (manualOverrides[txn.id]) {
+      return manualOverrides[txn.id];
+    }
+    const lowerDesc = String(txn.desc).toLowerCase();
     for (const [category, keywords] of Object.entries(rules)) {
       if (keywords.some(k => lowerDesc.includes(k.toLowerCase()))) return category;
     }
@@ -175,8 +290,11 @@ export default function App() {
   }, [bankTransactions]);
 
   const allTransactions = useMemo(() => {
-    return [...nonCcBankTransactions, ...ccTransactions].map(t => ({ ...t, category: categorize(t.desc) }));
-  }, [nonCcBankTransactions, ccTransactions, rules]);
+    return [...nonCcBankTransactions, ...ccTransactions].map(t => ({ 
+      ...t, 
+      category: categorize(t) 
+    }));
+  }, [nonCcBankTransactions, ccTransactions, rules, manualOverrides]);
 
   const categoryTotals = useMemo(() => {
     const totals = {};
@@ -296,7 +414,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-800 font-sans pb-12">
-      {/* Top Banner Header */}
+{/* Top Banner Header */}
       <div className="bg-gradient-to-r from-slate-900 via-blue-900 to-indigo-900 text-white shadow-md py-4 px-6 mb-6">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-3">
           <div className="flex items-center gap-3">
@@ -304,16 +422,34 @@ export default function App() {
               <FileSpreadsheet className="w-6 h-6 text-white" />
             </div>
             <div>
-              <h1 className="text-xl font-extrabold tracking-tight">Mansheim Budget Processor</h1>
+              <div className="flex items-center gap-2">
+                <h1 className="text-xl font-extrabold tracking-tight">Mansheim Budget Processor</h1>
+                {statementMonth && (
+                  <span className="bg-blue-800 text-blue-200 text-xs font-semibold px-2.5 py-0.5 rounded-full flex items-center gap-1 border border-blue-700">
+                    <Calendar className="w-3 h-3" /> Active: {statementMonth}
+                  </span>
+                )}
+              </div>
               <p className="text-slate-300 text-xs">Automated Statement Categorization & Reconciliation</p>
             </div>
           </div>
 
-          <div className="flex items-center gap-4">
-            <div className="text-right hidden sm:block">
-              <p className="text-[11px] text-slate-400">Total Tracked Expenses</p>
-              <p className="text-base font-mono font-bold text-emerald-400">₪{totalExpenseSum.toFixed(2)}</p>
+          <div className="flex items-center gap-3">
+            {/* Saved Months Dropdown Menu (Always Visible) */}
+            <div className="flex items-center gap-1.5 bg-blue-950/80 px-3 py-2 rounded-xl border border-blue-700/60 shadow-inner">
+              <Folder className="w-4 h-4 text-blue-400" />
+              <select
+                value={statementMonth}
+                onChange={(e) => loadSavedMonth(e.target.value)}
+                className="bg-transparent text-xs font-semibold text-white outline-none cursor-pointer"
+              >
+                <option value="" className="text-slate-900">-- Select saved month --</option>
+                {savedMonthsList.map(m => (
+                  <option key={m} value={m} className="text-slate-900">Statement Month: {m}</option>
+                ))}
+              </select>
             </div>
+
             <button
               onClick={copyForCat3SumFormulaWithSpacing}
               className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold shadow transition-all transform active:scale-95 ${
@@ -326,50 +462,34 @@ export default function App() {
           </div>
         </div>
       </div>
-
       <div className="max-w-7xl mx-auto px-4 space-y-4">
         
-        {/* Compact File Upload Toolbar */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="bg-white px-4 py-3 rounded-xl shadow-xs border border-slate-200/80 flex items-center justify-between">
-            <div className="flex items-center gap-2.5 truncate">
-              {bankFileName ? (
-                <CheckCircle2 className="w-5 h-5 text-emerald-500 flex-shrink-0" />
-              ) : (
-                <span className="w-2.5 h-2.5 rounded-full bg-indigo-500 flex-shrink-0"></span>
-              )}
-              <div className="truncate">
-                <span className="text-xs font-bold text-slate-800">Bank (עובר ושב)</span>
-                {bankFileName && (
-                  <p className="text-[11px] text-slate-500 truncate">{bankFileName} ({bankTransactions.length} items)</p>
-                )}
-              </div>
+        {/* Combined Single-Action Upload Toolbar */}
+        <div className="bg-white p-4 rounded-xl shadow-xs border border-slate-200/80 flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-indigo-50 text-indigo-600 rounded-lg">
+              <Upload className="w-5 h-5" />
             </div>
-            <label className="cursor-pointer bg-slate-100 hover:bg-indigo-50 text-slate-700 hover:text-indigo-700 px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition flex-shrink-0">
-              <Upload className="w-3.5 h-3.5" />
-              {bankFileName ? "Change File" : "Upload Bank"}
-              <input type="file" accept=".xlsx, .xls" onChange={(e) => handleFileUpload(e, 'bank')} className="hidden" />
-            </label>
+            <div>
+              <h2 className="text-xs font-bold text-slate-800">Upload Statements (Bank & Credit Card)</h2>
+              <p className="text-[11px] text-slate-400">Select both Excel files simultaneously in one action</p>
+            </div>
           </div>
 
-          <div className="bg-white px-4 py-3 rounded-xl shadow-xs border border-slate-200/80 flex items-center justify-between">
-            <div className="flex items-center gap-2.5 truncate">
-              {ccFileName ? (
-                <CheckCircle2 className="w-5 h-5 text-emerald-500 flex-shrink-0" />
-              ) : (
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 flex-shrink-0"></span>
-              )}
-              <div className="truncate">
-                <span className="text-xs font-bold text-slate-800">Credit Card (כרטיסי אשראי)</span>
-                {ccFileName && (
-                  <p className="text-[11px] text-slate-500 truncate">{ccFileName} ({ccTransactions.length} items)</p>
-                )}
-              </div>
-            </div>
-            <label className="cursor-pointer bg-slate-100 hover:bg-emerald-50 text-slate-700 hover:text-emerald-700 px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition flex-shrink-0">
-              <Upload className="w-3.5 h-3.5" />
-              {ccFileName ? "Change File" : "Upload CC"}
-              <input type="file" accept=".xlsx, .xls" onChange={(e) => handleFileUpload(e, 'cc')} className="hidden" />
+          <div className="flex items-center gap-3">
+            {bankFileName && (
+              <span className="text-[11px] bg-emerald-50 text-emerald-700 font-medium px-2.5 py-1 rounded-lg flex items-center gap-1 border border-emerald-200">
+                <CheckCircle2 className="w-3.5 h-3.5" /> Bank: {bankFileName}
+              </span>
+            )}
+            {ccFileName && (
+              <span className="text-[11px] bg-emerald-50 text-emerald-700 font-medium px-2.5 py-1 rounded-lg flex items-center gap-1 border border-emerald-200">
+                <CheckCircle2 className="w-3.5 h-3.5" /> CC: {ccFileName}
+              </span>
+            )}
+            <label className="cursor-pointer bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-xl text-xs font-semibold shadow-xs transition flex items-center gap-2">
+              <Upload className="w-4 h-4" /> Upload Statements
+              <input type="file" accept=".xlsx, .xls" multiple onChange={handleMultiFileUpload} className="hidden" />
             </label>
           </div>
         </div>
@@ -479,19 +599,37 @@ export default function App() {
                     {isExpanded && txns.length > 0 && (
                       <div className="border-t border-slate-100 bg-slate-50/90 p-3 space-y-2 max-h-56 overflow-y-auto">
                         <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1">Individual Transactions:</p>
-                        {txns.map((t, i) => (
-                          <div key={i} className="bg-white p-2.5 rounded-lg border border-slate-200/60 flex justify-between items-center text-[11px] shadow-2xs">
-                            <div className="space-y-0.5 pr-2 truncate">
-                              <p className="font-semibold text-slate-800 truncate">{t.desc}</p>
-                              <div className="flex items-center gap-1.5 text-slate-400 text-[10px]">
-                                <span>{t.date}</span>
-                                <span>•</span>
-                                <span className="bg-slate-100 px-1 py-0.5 rounded text-[9px] font-medium">{t.source}</span>
+                        {txns.map((t) => (
+                          <div key={t.id} className="bg-white p-2.5 rounded-lg border border-slate-200/60 flex flex-col gap-2 text-[11px] shadow-2xs">
+                            <div className="flex justify-between items-center">
+                              <div className="space-y-0.5 pr-2 truncate">
+                                <p className="font-semibold text-slate-800 truncate">{t.desc}</p>
+                                <div className="flex items-center gap-1.5 text-slate-400 text-[10px]">
+                                  <span>{t.date}</span>
+                                  <span>•</span>
+                                  <span className="bg-slate-100 px-1 py-0.5 rounded text-[9px] font-medium">{t.source}</span>
+                                </div>
                               </div>
+                              <span className={`font-mono font-bold whitespace-nowrap ${t.amount < 0 ? 'text-rose-600' : 'text-slate-900'}`}>
+                                ₪{t.amount.toFixed(2)}
+                              </span>
                             </div>
-                            <span className={`font-mono font-bold whitespace-nowrap ${t.amount < 0 ? 'text-rose-600' : 'text-slate-900'}`}>
-                              ₪{t.amount.toFixed(2)}
-                            </span>
+                            {/* Manual Override Selector */}
+                            <div className="flex items-center justify-between border-t border-slate-100 pt-1.5">
+                              <span className="text-[10px] text-slate-400 flex items-center gap-1">
+                                <UserCheck className="w-3 h-3 text-blue-500" /> Override:
+                              </span>
+                              <select
+                                value={t.category}
+                                onChange={(e) => handleManualOverride(t.id, e.target.value)}
+                                className="bg-slate-50 border border-slate-200 rounded text-[10px] py-0.5 px-1 font-medium text-slate-700 outline-none focus:border-blue-500"
+                              >
+                                <option value="Uncategorized">-- Uncategorized --</option>
+                                {DEFAULT_CATEGORIES.map(c => (
+                                  <option key={c} value={c}>{c}</option>
+                                ))}
+                              </select>
+                            </div>
                           </div>
                         ))}
                       </div>
@@ -605,8 +743,8 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 font-mono">
-                    {filteredBankTable.map((t, idx) => (
-                      <tr key={idx} className="hover:bg-slate-50/80 transition">
+                    {filteredBankTable.map((t) => (
+                      <tr key={t.id} className="hover:bg-slate-50/80 transition">
                         <td className="p-2.5 text-slate-500 whitespace-nowrap">{t.date}</td>
                         <td className="p-2.5 font-sans font-medium text-slate-800">{t.desc}</td>
                         <td className={`p-2.5 text-right font-bold ${t.amount < 0 ? 'text-rose-600' : 'text-blue-600'}`}>
@@ -635,8 +773,8 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 font-mono">
-                    {filteredCcTable.map((t, idx) => (
-                      <tr key={idx} className="hover:bg-slate-50/80 transition">
+                    {filteredCcTable.map((t) => (
+                      <tr key={t.id} className="hover:bg-slate-50/80 transition">
                         <td className="p-2.5 text-slate-500 whitespace-nowrap">{t.date}</td>
                         <td className="p-2.5 font-sans font-medium text-slate-800">{t.desc}</td>
                         <td className={`p-2.5 text-right font-bold ${t.amount < 0 ? 'text-rose-600' : 'text-blue-600'}`}>
@@ -659,7 +797,7 @@ export default function App() {
               <h3 className="text-sm font-bold text-slate-800">
                 Uncategorized Transactions ({uncategorizedList.length})
               </h3>
-              <p className="text-xs text-slate-400">Clicking "Create Rule" pre-fills merchant name in Rules Manager</p>
+              <p className="text-xs text-slate-400">Assign a one-time override or create a static rule</p>
             </div>
             {uncategorizedList.length === 0 ? (
               <div className="text-center py-10">
@@ -668,22 +806,36 @@ export default function App() {
               </div>
             ) : (
               <div className="divide-y divide-slate-100">
-                {uncategorizedList.map((item, idx) => (
-                  <div key={idx} className="py-3 flex items-center justify-between gap-4 hover:bg-slate-50/60 px-2 rounded-lg transition">
-                    <div>
+                {uncategorizedList.map((item) => (
+                  <div key={item.id} className="py-3.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 hover:bg-slate-50/60 px-2 rounded-lg transition">
+                    <div className="space-y-0.5">
                       <p className="text-xs font-semibold text-slate-900">{item.desc}</p>
-                      <p className="text-[10px] text-slate-400 mt-0.5">{item.source} • {item.date}</p>
+                      <p className="text-[10px] text-slate-400">{item.source} • {item.date}</p>
                     </div>
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-3 w-full sm:w-auto justify-between">
                       <span className={`text-xs font-mono font-bold ${item.amount < 0 ? 'text-rose-600' : 'text-slate-900'}`}>
                         ₪{item.amount.toFixed(2)}
                       </span>
-                      <button
-                        onClick={() => goToRulesForKeyword(item.desc)}
-                        className="text-xs bg-blue-50 text-blue-700 hover:bg-blue-100 px-2.5 py-1 rounded-md font-semibold transition flex items-center gap-1"
-                      >
-                        <Tag className="w-3 h-3" /> Create Rule
-                      </button>
+                      <div className="flex items-center gap-2">
+                        {/* Quick Manual Override Dropdown */}
+                        <select
+                          onChange={(e) => handleManualOverride(item.id, e.target.value)}
+                          defaultValue=""
+                          className="bg-slate-100 border border-slate-200 rounded text-xs py-1 px-2 font-medium text-slate-700 outline-none focus:border-blue-500"
+                        >
+                          <option value="" disabled>One-time Override...</option>
+                          {DEFAULT_CATEGORIES.map(c => (
+                            <option key={c} value={c}>{c}</option>
+                          ))}
+                        </select>
+
+                        <button
+                          onClick={() => goToRulesForKeyword(item.desc)}
+                          className="text-xs bg-blue-50 text-blue-700 hover:bg-blue-100 px-3 py-1 rounded-md font-semibold transition flex items-center gap-1 whitespace-nowrap"
+                        >
+                          <Tag className="w-3 h-3" /> Create Rule
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -697,8 +849,10 @@ export default function App() {
           <div ref={rulesSectionRef} className="bg-white rounded-xl shadow-xs border border-slate-200/80 p-5 space-y-5">
             <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
               <div>
-                <h3 className="text-sm font-bold text-slate-800">Categorization Keyword Rules</h3>
-                <p className="text-xs text-slate-400 mt-0.5">Saving a rule automatically takes you back to Uncategorized items.</p>
+                <h3 className="text-sm font-bold text-slate-800">
+                  Global Categorization Rules
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">Rules are static and apply automatically across all statement months.</p>
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -765,7 +919,7 @@ export default function App() {
                           onClick={() => handleRemoveRule(category, kw)}
                           className="text-slate-400 hover:text-red-500 transition"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
+                          <Trash2 className="w-3 h-3" />
                         </button>
                       </span>
                     ))}
