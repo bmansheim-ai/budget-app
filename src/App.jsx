@@ -441,7 +441,7 @@ export default function App() {
         formattedRows.push(`=${txns[0].amount.toFixed(2)}`);
       } else {
         const items = txns.map(t => t.amount.toFixed(2)).join(", ");
-        formattedRows.push(`=SUM(${items})`);
+        formattedRows.push(`=-SUM(${items})`);
       }
       formattedRows.push("");
     });
