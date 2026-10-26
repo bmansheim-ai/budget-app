@@ -287,12 +287,11 @@ export default function App() {
         } else if (isCc || !isBank) {
           setCcFileName(file.name);
           
-          let ccLast4 = "";
-          const fileMatch = file.name.match(/\d{4}/);
-          if (fileMatch) ccLast4 = fileMatch[0].slice(-4);
-
           let headerIdx = data.findIndex(row => row && row.some(cell => String(cell).includes("בית עסק")));
           if (headerIdx === -1) headerIdx = 7;
+          const headerRow = data[headerIdx] || [];
+          let cardColIdx = headerRow.findIndex(cell => String(cell).includes("כרטיס"));
+
           const rows = data.slice(headerIdx + 1);
           
           const parsed = rows.map((r, idx) => {
@@ -301,6 +300,21 @@ export default function App() {
             if (amt > 0) amt = -amt;
             const { dateStr, timestamp } = formatDateAndMonth(r[2]);
             const desc = String(r[1] || "");
+
+            let ccLast4 = "CC";
+            if (cardColIdx !== -1 && r[cardColIdx] !== undefined) {
+              const cardVal = String(r[cardColIdx]);
+              const matchDigits = cardVal.match(/\d{4}/);
+              if (matchDigits) {
+                ccLast4 = matchDigits[0];
+              } else if (cardVal.trim().length > 0) {
+                ccLast4 = cardVal.trim().slice(-4);
+              }
+            } else {
+              const fileMatch = file.name.match(/\d{4}/);
+              if (fileMatch) ccLast4 = fileMatch[0].slice(-4);
+            }
+
             const txnKey = `${r[2]}_${desc}_${amt}_cc_${idx}`;
             return { 
               id: txnKey,
@@ -308,7 +322,7 @@ export default function App() {
               timestamp,
               desc: desc, 
               amount: amt, 
-              ccLast4: ccLast4 || "CC",
+              ccLast4: ccLast4,
               source: "Credit Card" 
             };
           }).filter(item => item && item.desc && !isNaN(item.amount));
@@ -796,7 +810,7 @@ export default function App() {
                               <div className="flex justify-between items-center">
                                 <div className="space-y-0.5 pr-2 truncate">
                                   <p className="font-semibold text-slate-800 truncate">
-                                    {t.desc} {t.ccLast4 ? `(CC: ...${t.ccLast4})` : ""}
+                                    {t.desc} {t.ccLast4 ? `(CC: ${t.ccLast4})` : ""}
                                   </p>
                                   <div className="flex items-center gap-1.5 text-slate-400 text-[10px]">
                                     <span>{t.date}</span>
@@ -1001,7 +1015,7 @@ export default function App() {
                     {filteredCcTable.map((t) => (
                       <tr key={t.id} className="hover:bg-slate-50/80 transition">
                         <td className="p-2.5 text-slate-500 whitespace-nowrap">{t.date}</td>
-                        <td className="p-2.5 font-bold text-indigo-700 whitespace-nowrap">...{t.ccLast4}</td>
+                        <td className="p-2.5 font-bold text-indigo-700 whitespace-nowrap">{t.ccLast4}</td>
                         <td className="p-2.5 font-sans font-medium text-slate-800">{t.desc}</td>
                         <td className={`p-2.5 text-right font-bold ${t.amount < 0 ? 'text-rose-600' : 'text-blue-600'}`}>
                           {t.amount.toFixed(2)}
@@ -1038,7 +1052,7 @@ export default function App() {
                     <div key={item.id} className="py-3.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 hover:bg-slate-50/60 px-2 rounded-lg transition">
                       <div className="space-y-0.5">
                         <p className="text-xs font-semibold text-slate-900">
-                          {item.desc} {item.ccLast4 ? `(CC: ...${item.ccLast4})` : ""}
+                          {item.desc} {item.ccLast4 ? `(CC: ${item.ccLast4})` : ""}
                         </p>
                         <p className="text-[10px] text-slate-400">{item.source} • {item.date}</p>
                       </div>
