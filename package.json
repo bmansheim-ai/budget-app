@@ -2,46 +2,51 @@
   "name": "budget-app",
   "private": true,
   "version": "1.0.0",
-  "type": "module",
-  "main": "electron.js",
-  "homepage": "./",
+  "main": "main.js",
+  "type": "commonjs",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "lint": "eslint .",
     "preview": "vite preview",
-"electron:dev": "concurrently -k \"npm.cmd run dev\" \"wait-on tcp:5173 && cross-env ELECTRON_START_URL=http://localhost:5173 electron.cmd .\"",    "electron:build": "vite build && electron-builder"
+    "package:portable": "vite build && electron-builder --portable"
+  },
+  "dependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "lucide-react": "^1.16.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.9.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.3",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.6.1",
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8",
+    "eslint": "^9.9.0",
+    "eslint-plugin-react": "^7.35.0",
+    "eslint-plugin-react-hooks": "^5.1.0-rc.0",
+    "eslint-plugin-react-refresh": "^0.4.9",
+    "globals": "^15.9.0",
+    "postcss": "^8.5.31",
+    "tailwindcss": "^4.3.3",
+    "vite": "^5.4.1"
   },
   "build": {
     "appId": "com.mansheim.budgetprocessor",
     "productName": "Mansheim Budget Processor",
     "directories": {
-      "output": "dist-electron"
+      "output": "release"
     },
+    "files": [
+      "dist/**/*",
+      "main.js"
+    ],
     "win": {
-      "target": [
-        "nsis",
-        "portable"
-      ]
+      "target": "portable"
     }
-  },
-  "dependencies": {
-    "lucide-react": "^1.16.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "xlsx": "^0.18.5"
-  },
-  "devDependencies": {
-    "@types/react": "^18.3.3",
-    "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.3.1",
-    "autoprefixer": "^10.6.1",
-    "concurrently": "^9.1.0",
-    "cross-env": "^7.0.3",
-    "electron": "^33.0.0",
-    "electron-builder": "^25.1.8",
-    "postcss": "^8.5.31",
-    "tailwindcss": "^3.4.17",
-    "vite": "^5.4.1",
-    "wait-on": "^8.0.1"
   }
 }
