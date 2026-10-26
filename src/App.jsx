@@ -3,7 +3,7 @@ import * as XLSX from "xlsx";
 import { 
   Upload, FileSpreadsheet, Copy, Check, Plus, Trash2, Tag, ChevronDown, 
   ChevronUp, Search, Download, FolderUp, CheckCircle2, 
-  Scale, CreditCard, Building2, Table, UserCheck, Calendar, Folder, Settings, X, AlertTriangle, ArrowUpDown
+  Scale, CreditCard, Building2, Table, UserCheck, Calendar, Folder, Settings, X, AlertTriangle, ArrowUpDown, Save
 } from "lucide-react";
 
 // Exact 56 categories from the cat3 sheet
@@ -72,6 +72,7 @@ export default function App() {
   const [bankBalances, setBankBalances] = useState({ beginning: 0, ending: 0 });
   const [statementMonth, setStatementMonth] = useState("");
   const [savedMonthsList, setSavedMonthsList] = useState([]);
+  const [saveStatus, setSaveStatus] = useState("Saved");
   
   // Settings Modal State
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -110,8 +111,18 @@ export default function App() {
     refreshSavedMonths();
   }, [statementMonth]);
 
+  // Mark status as unsaved when changes occur
   useEffect(() => {
-    if (!statementMonth) return;
+    if (statementMonth) {
+      setSaveStatus("Unsaved changes");
+    }
+  }, [bankTransactions, ccTransactions, manualOverrides]);
+
+  const handleExplicitSave = () => {
+    if (!statementMonth) {
+      alert("No active statement month loaded to save.");
+      return;
+    }
     const monthData = {
       bankTransactions,
       ccTransactions,
@@ -122,7 +133,9 @@ export default function App() {
     };
     localStorage.setItem(`budget_month_${statementMonth}`, JSON.stringify(monthData));
     refreshSavedMonths();
-  }, [statementMonth, bankTransactions, ccTransactions, bankFileName, ccFileName, bankBalances, manualOverrides]);
+    setSaveStatus("Saved");
+    alert(`Progress for month ${statementMonth} saved successfully!`);
+  };
 
   const loadSavedMonth = (monthKey) => {
     if (!monthKey) return;
@@ -137,6 +150,7 @@ export default function App() {
         setBankBalances(parsed.bankBalances || { beginning: 0, ending: 0 });
         setManualOverrides(parsed.manualOverrides || {});
         setStatementMonth(monthKey);
+        setSaveStatus("Saved");
       } catch (err) {
         console.error("Failed to load month progress", err);
       }
@@ -155,6 +169,7 @@ export default function App() {
         setBankBalances({ beginning: 0, ending: 0 });
         setManualOverrides({});
         setStatementMonth("");
+        setSaveStatus("Saved");
       }
       refreshSavedMonths();
       setMonthToPurge("");
@@ -252,6 +267,9 @@ export default function App() {
             const amount = parseFloat(r[3]) || 0;
             const balance = parseFloat(r[4]) || 0;
             const txnKey = `${r[0]}_${desc}_${amount}_${idx}`;
+            
+            const isFundingTransfer = amount > 0 && desc.includes("255");
+
             return { 
               id: txnKey,
               date: dateStr, 
@@ -259,6 +277,7 @@ export default function App() {
               desc: desc, 
               amount: amount, 
               balance: balance,
+              isFundingTransfer,
               source: "Bank" 
             };
           }).filter(item => item && item.desc && !isNaN(item.amount));
@@ -291,14 +310,31 @@ export default function App() {
           if (headerIdx === -1) headerIdx = 7;
           const headerRow = data[headerIdx] || [];
           let cardColIdx = headerRow.findIndex(cell => String(cell).includes("כרטיס"));
+          // Look for billing date column ('תאריך חיוב')
+          let billingDateColIdx = headerRow.findIndex(cell => String(cell).includes("חיוב"));
 
           const rows = data.slice(headerIdx + 1);
           
           const parsed = rows.map((r, idx) => {
             if (!r || r.length < 9) return null;
-            let amt = parseFloat(r[8]) || 0;
-            if (amt > 0) amt = -amt;
+            
+            // Fix CC charge vs credit: if amount is explicitly positive in column 8, keep it positive (credit/refund)
+            let rawAmt = parseFloat(r[8]) || 0;
+            let amt = rawAmt < 0 ? rawAmt : rawAmt; // if rawAmt is positive, keep positive, else negative
+            if (amt === 0 && r[8]) amt = parseFloat(r[8]) || 0;
+            if (amt < 0) {
+              // standard expense
+            }
+
             const { dateStr, timestamp } = formatDateAndMonth(r[2]);
+            
+            // Extract billing date if available
+            let billingDateStr = "";
+            if (billingDateColIdx !== -1 && r[billingDateColIdx]) {
+              const bDate = formatDateAndMonth(r[billingDateColIdx]);
+              billingDateStr = bDate.dateStr;
+            }
+
             const desc = String(r[1] || "");
 
             let ccLast4 = "CC";
@@ -319,6 +355,7 @@ export default function App() {
             return { 
               id: txnKey,
               date: dateStr, 
+              billingDate: billingDateStr || dateStr,
               timestamp,
               desc: desc, 
               amount: amt, 
@@ -411,21 +448,17 @@ export default function App() {
     return allTransactions.filter(t => t.category === "Uncategorized");
   }, [allTransactions]);
 
-  const totalExpenseSum = useMemo(() => {
-    return Object.values(categoryTotals).reduce((a, b) => a + Math.abs(b), 0);
-  }, [categoryTotals]);
-
-  // Reconciliation Audit Values
+  // Reconciliation Calculations & Breakdowns
   const bankBalanceDifference = bankBalances.ending - bankBalances.beginning;
-  const totalBankStatementNet = useMemo(() => {
-    return bankTransactions.reduce((acc, t) => acc + t.amount, 0);
-  }, [bankTransactions]);
-  const totalCategorizedNet = useMemo(() => {
-    return allTransactions.reduce((acc, t) => acc + t.amount, 0);
-  }, [allTransactions]);
-  const reconciliationDifference = bankBalanceDifference - totalCategorizedNet;
 
-  // Credit Card Audit Values
+  // 1. Total Funding Inflows (Account ending in 255)
+  const totalFundingInflows = useMemo(() => {
+    return bankTransactions
+      .filter(t => t.isFundingTransfer)
+      .reduce((acc, t) => acc + t.amount, 0);
+  }, [bankTransactions]);
+
+  // 2. Credit Card Batch Deductions from Bank vs Statement Sum
   const ccPaymentBankItems = useMemo(() => {
     return bankTransactions.filter(t => {
       const desc = t.desc;
@@ -452,9 +485,9 @@ export default function App() {
       if (txns.length === 0) {
         formattedRows.push("");
       } else if (txns.length === 1) {
-        formattedRows.push(`=${txns[0].amount.toFixed(2)}`);
+        formattedRows.push(`=-${Math.abs(txns[0].amount).toFixed(2)}`);
       } else {
-        const items = txns.map(t => t.amount.toFixed(2)).join(", ");
+        const items = txns.map(t => Math.abs(t.amount).toFixed(2)).join(", ");
         formattedRows.push(`=-SUM(${items})`);
       }
       formattedRows.push("");
@@ -564,6 +597,7 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-3">
+            {/* Saved Months Dropdown */}
             <div className="flex items-center gap-1.5 bg-blue-950/80 px-3 py-2 rounded-xl border border-blue-700/60 shadow-inner">
               <Folder className="w-4 h-4 text-blue-400" />
               <select
@@ -578,6 +612,18 @@ export default function App() {
               </select>
             </div>
 
+            {/* Explicit Save Button */}
+            <button
+              onClick={handleExplicitSave}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold shadow transition ${
+                saveStatus === "Saved" ? 'bg-emerald-700 hover:bg-emerald-600 text-white' : 'bg-amber-600 hover:bg-amber-500 text-white'
+              }`}
+              title="Save current month progress to local storage"
+            >
+              <Save className="w-4 h-4" /> {saveStatus}
+            </button>
+
+            {/* Settings Button */}
             <button
               onClick={() => setIsSettingsOpen(true)}
               className="p-2 bg-blue-800 hover:bg-blue-700 text-white rounded-xl shadow transition"
@@ -586,6 +632,7 @@ export default function App() {
               <Settings className="w-5 h-5" />
             </button>
 
+            {/* Copy Formula Button */}
             <button
               onClick={copyForCat3SumFormulaWithSpacing}
               className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold shadow transition-all transform active:scale-95 ${
@@ -809,13 +856,13 @@ export default function App() {
                             <div key={t.id} className="bg-white p-2.5 rounded-lg border border-slate-200/60 flex flex-col gap-2 text-[11px] shadow-2xs">
                               <div className="flex justify-between items-center">
                                 <div className="space-y-0.5 pr-2 truncate">
-                                  <p className="font-semibold text-slate-800 truncate">
-                                    {t.desc} {t.ccLast4 ? `(CC: ${t.ccLast4})` : ""}
-                                  </p>
+                                  <p className="font-semibold text-slate-800 truncate">{t.desc}</p>
                                   <div className="flex items-center gap-1.5 text-slate-400 text-[10px]">
-                                    <span>{t.date}</span>
+                                    <span>{t.date} {t.billingDate && t.billingDate !== t.date ? `(Billing: ${t.billingDate})` : ""}</span>
                                     <span>•</span>
-                                    <span className="bg-slate-100 px-1 py-0.5 rounded text-[9px] font-medium">{t.source}</span>
+                                    <span className="bg-slate-100 px-1 py-0.5 rounded text-[9px] font-medium">
+                                      {t.source === "Credit Card" ? `Credit Card • ${t.ccLast4}` : t.source}
+                                    </span>
                                     {t.categorizationType === 'rule' && (
                                       <span className="bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded text-[9px] font-semibold">Matched by Rule</span>
                                     )}
@@ -824,8 +871,8 @@ export default function App() {
                                     )}
                                   </div>
                                 </div>
-                                <span className={`font-mono font-bold whitespace-nowrap ${t.amount < 0 ? 'text-rose-600' : 'text-slate-900'}`}>
-                                  ₪{t.amount.toFixed(2)}
+                                <span className={`font-mono font-bold whitespace-nowrap ${t.amount < 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                                  {t.amount < 0 ? `₪${t.amount.toFixed(2)}` : `+₪${t.amount.toFixed(2)}`}
                                 </span>
                               </div>
 
@@ -866,15 +913,12 @@ export default function App() {
         {activeTab === 'reconciliation' && (
           <div className="space-y-6">
             
-            {/* 1. Bank Reconciliation Card */}
+            {/* 1. Streamlined Bank Balance Reconciliation Audit Card with Funding Inflows on the Right */}
             <div className="bg-white rounded-xl shadow-xs border border-blue-200 p-5 space-y-4">
               <div className="flex justify-between items-center border-b border-slate-100 pb-3">
                 <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
                   <Building2 className="w-4 h-4 text-blue-600" /> Bank Balance Reconciliation Audit
                 </h3>
-                <span className="text-xs bg-blue-50 text-blue-700 px-2.5 py-1 rounded-full font-mono font-bold">
-                  Statement Net: ₪{totalBankStatementNet.toFixed(2)}
-                </span>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 text-xs">
@@ -887,45 +931,57 @@ export default function App() {
                   <p className="text-base font-mono font-bold text-slate-800 mt-1">₪{bankBalances.ending.toFixed(2)}</p>
                 </div>
                 <div className="bg-blue-50/50 p-3 rounded-xl border border-blue-100">
-                  <p className="text-blue-700 font-medium">Target Difference (End - Beg)</p>
+                  <p className="text-blue-700 font-medium">Period Change (End - Beg)</p>
                   <p className={`text-base font-mono font-bold mt-1 ${bankBalanceDifference < 0 ? 'text-rose-600' : 'text-blue-900'}`}>
                     ₪{bankBalanceDifference.toFixed(2)}
                   </p>
                 </div>
-                <div className={`p-3 rounded-xl border ${Math.abs(reconciliationDifference) < 0.01 ? 'bg-emerald-50/50 border-emerald-200 text-emerald-800' : 'bg-amber-50/50 border-amber-200 text-amber-800'}`}>
-                  <p className="font-medium">Unaccounted Difference</p>
-                  <p className="text-base font-mono font-bold mt-1">
-                    ₪{reconciliationDifference.toFixed(2)}
-                  </p>
+                <div className="bg-indigo-50/50 p-3 rounded-xl border border-indigo-100">
+                  <p className="text-indigo-700 font-medium">Funding Inflows (Acct ...255)</p>
+                  <p className="text-base font-mono font-bold text-indigo-700 mt-1">₪{totalFundingInflows.toFixed(2)}</p>
                 </div>
               </div>
             </div>
 
-            {/* 2. CC Verification Card */}
+            {/* 2. Credit Card Batch vs Statement Breakdown Card */}
             <div className="bg-white rounded-xl shadow-xs border border-emerald-200 p-5 space-y-4">
               <div className="flex justify-between items-center border-b border-slate-100 pb-3">
                 <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
                   <CreditCard className="w-4 h-4 text-emerald-600" /> Credit Card Deductions vs Statement Verification
                 </h3>
-                <span className="text-xs bg-emerald-50 text-emerald-700 px-2.5 py-1 rounded-full font-mono font-bold">
-                  {ccPaymentBankItems.length} Bank CC Charges Found
+                <span className={`text-xs px-2.5 py-1 rounded-full font-mono font-bold ${Math.abs(ccMatchingDifference) < 0.01 ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
+                  Delta: ₪{ccMatchingDifference.toFixed(2)} {Math.abs(ccMatchingDifference) < 0.01 ? "(Perfect Match!)" : "(Check Variance)"}
                 </span>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
                 <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
-                  <p className="text-slate-500 font-medium">Total Deducted from Bank</p>
+                  <p className="text-slate-500 font-medium">Total Deducted from Bank (Batches)</p>
                   <p className="text-base font-mono font-bold text-slate-800 mt-1">₪{totalCcPaymentsFromBank.toFixed(2)}</p>
                 </div>
                 <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
                   <p className="text-slate-500 font-medium">Total CC Statement Sum</p>
                   <p className="text-base font-mono font-bold text-slate-800 mt-1">₪{totalCcStatementSum.toFixed(2)}</p>
                 </div>
-                <div className={`p-3 rounded-xl border ${Math.abs(ccMatchingDifference) < 0.01 ? 'bg-emerald-50/50 border-emerald-200 text-emerald-800' : 'bg-amber-50/50 border-amber-200 text-amber-800'}`}>
-                  <p className="font-medium">Matching Difference</p>
-                  <p className="text-base font-mono font-bold mt-1">
-                    ₪{ccMatchingDifference.toFixed(2)} {Math.abs(ccMatchingDifference) < 0.01 ? "(Perfect Match!)" : ""}
-                  </p>
+              </div>
+
+              {/* Itemized Bank CC Batch Debits List */}
+              <div className="space-y-2 pt-2">
+                <p className="text-xs font-bold text-slate-700 uppercase tracking-wider">Itemized Bank CC Deductions ({ccPaymentBankItems.length}):</p>
+                <div className="max-h-36 overflow-y-auto border border-slate-100 rounded-xl divide-y divide-slate-100 font-mono text-xs">
+                  {ccPaymentBankItems.length === 0 ? (
+                    <p className="p-3 text-slate-400 text-center font-sans">No credit card batch debits found in bank statement.</p>
+                  ) : (
+                    ccPaymentBankItems.map((item) => (
+                      <div key={item.id} className="p-2.5 flex justify-between items-center hover:bg-slate-50">
+                        <div className="flex items-center gap-2">
+                          <span className="text-slate-400 text-[11px]">{item.date}</span>
+                          <span className="font-sans font-medium text-slate-800">{item.desc}</span>
+                        </div>
+                        <span className="font-bold text-rose-600">₪{Math.abs(item.amount).toFixed(2)}</span>
+                      </div>
+                    ))
+                  )}
                 </div>
               </div>
             </div>
@@ -987,11 +1043,11 @@ export default function App() {
               </div>
             </div>
 
-            {/* 4. Credit Card Transactions Table (Sortable) */}
+            {/* 4. Credit Card Transactions Table (Sortable with Billing Date) */}
             <div className="bg-white rounded-xl shadow-xs border border-slate-200 overflow-hidden space-y-2 p-4">
               <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center justify-between">
                 <span>Credit Card Statement Transactions ({filteredCcTable.length})</span>
-                <span className="text-slate-400 text-[11px] font-normal">Includes Card Last 4 Digits</span>
+                <span className="text-slate-400 text-[11px] font-normal">Includes Card & Billing Date (`תאריך חיוב`)</span>
               </h4>
               <div className="overflow-x-auto max-h-80 border border-slate-100 rounded-lg">
                 <table className="w-full text-left text-xs border-collapse">
@@ -999,6 +1055,9 @@ export default function App() {
                     <tr>
                       <th onClick={() => handleCcSort('timestamp')} className="p-2.5 cursor-pointer hover:bg-slate-100 transition">
                         <div className="flex items-center gap-1">Date <ArrowUpDown className="w-3 h-3 text-slate-400" /></div>
+                      </th>
+                      <th onClick={() => handleCcSort('billingDate')} className="p-2.5 cursor-pointer hover:bg-slate-100 transition">
+                        <div className="flex items-center gap-1">Billing Date <ArrowUpDown className="w-3 h-3 text-slate-400" /></div>
                       </th>
                       <th onClick={() => handleCcSort('ccLast4')} className="p-2.5 cursor-pointer hover:bg-slate-100 transition">
                         <div className="flex items-center gap-1">Card (Last 4) <ArrowUpDown className="w-3 h-3 text-slate-400" /></div>
@@ -1015,10 +1074,11 @@ export default function App() {
                     {filteredCcTable.map((t) => (
                       <tr key={t.id} className="hover:bg-slate-50/80 transition">
                         <td className="p-2.5 text-slate-500 whitespace-nowrap">{t.date}</td>
+                        <td className="p-2.5 text-slate-500 whitespace-nowrap">{t.billingDate}</td>
                         <td className="p-2.5 font-bold text-indigo-700 whitespace-nowrap">{t.ccLast4}</td>
                         <td className="p-2.5 font-sans font-medium text-slate-800">{t.desc}</td>
-                        <td className={`p-2.5 text-right font-bold ${t.amount < 0 ? 'text-rose-600' : 'text-blue-600'}`}>
-                          {t.amount.toFixed(2)}
+                        <td className={`p-2.5 text-right font-bold ${t.amount < 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                          {t.amount < 0 ? `₪${t.amount.toFixed(2)}` : `+₪${t.amount.toFixed(2)}`}
                         </td>
                       </tr>
                     ))}
@@ -1051,14 +1111,16 @@ export default function App() {
                   return (
                     <div key={item.id} className="py-3.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 hover:bg-slate-50/60 px-2 rounded-lg transition">
                       <div className="space-y-0.5">
-                        <p className="text-xs font-semibold text-slate-900">
-                          {item.desc} {item.ccLast4 ? `(CC: ${item.ccLast4})` : ""}
-                        </p>
-                        <p className="text-[10px] text-slate-400">{item.source} • {item.date}</p>
+                        <p className="text-xs font-semibold text-slate-900">{item.desc}</p>
+                        <div className="flex items-center gap-1.5 text-[10px] text-slate-400">
+                          <span>{item.date} {item.billingDate && item.billingDate !== item.date ? `(Billing: ${item.billingDate})` : ""}</span>
+                          <span>•</span>
+                          <span>{item.source === "Credit Card" ? `Credit Card • ${item.ccLast4}` : item.source}</span>
+                        </div>
                       </div>
                       <div className="flex items-center gap-3 w-full sm:w-auto justify-between">
-                        <span className={`text-xs font-mono font-bold ${item.amount < 0 ? 'text-rose-600' : 'text-slate-900'}`}>
-                          ₪{item.amount.toFixed(2)}
+                        <span className={`text-xs font-mono font-bold ${item.amount < 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                          {item.amount < 0 ? `₪${item.amount.toFixed(2)}` : `+₪${item.amount.toFixed(2)}`}
                         </span>
                         <div className="flex items-center gap-2">
                           <select
