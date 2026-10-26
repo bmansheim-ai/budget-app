@@ -9,8 +9,8 @@
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "package:portable": "vite build && electron-builder --portable"
-  },
+    "package:portable": "node increment-version.js && vite build && electron-builder --win --x64"
+  },,
   "dependencies": {
     "@tailwindcss/postcss": "^4.3.3",
     "lucide-react": "^1.16.0",
