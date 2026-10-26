@@ -1,7 +1,7 @@
 {
   "name": "budget-app",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.3",
   "main": "main.js",
   "type": "commonjs",
   "scripts": {
@@ -10,7 +10,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "package:portable": "node increment-version.js && vite build && electron-builder --win --x64"
-  },,
+  },
   "dependencies": {
     "@tailwindcss/postcss": "^4.3.3",
     "lucide-react": "^1.16.0",
